@@ -11,5 +11,7 @@ renamed it to samsung_mfp and made it perfect for Samsung SCX-4600:
 * Removed right-side white band
 * Removed top-side white band in mono images
 
+All changes are visible in a diff with the initial commit.
+
 Note. samsung_mfp.conf.in and xerox_mfp.conf.in overlap in defining scanners USB identification,
 so you may need to solve the conflict, e.g. disabling one or another backend.
