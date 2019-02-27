@@ -1,0 +1,5 @@
+# exclude .gitignore and similar from the generated tarball
+.* export-ignore
+# exclude archives
+*.zip export-ignore
+*.tar.gz export-ignore
