@@ -1,5 +1,5 @@
 /*
- * SANE backend for Xerox Phaser 3200MFP
+ * SANE backend for Samsung SCX-4600
  * Copyright 2008 ABC <abc@telekom.ru>
  *
  * This program is licensed under GPL + SANE exception.
@@ -22,13 +22,14 @@
 #include "../include/sane/sanei_thread.h"
 #include "../include/sane/sanei_usb.h"
 #include "../include/sane/sanei_config.h"
-#define BACKEND_NAME xerox_mfp
+#define BACKEND_NAME samsung_mfp
 #include "../include/sane/sanei_backend.h"
-#include "xerox_mfp.h"
+#include "samsung_mfp.h"
 
 #define BACKEND_BUILD 11
-#define XEROX_CONFIG_FILE "xerox_mfp.conf"
+#define SAMSUNG_CONFIG_FILE "samsung_mfp.conf"
 
+static int whitelines = 0;
 static const SANE_Device **devlist = NULL;	/* sane_get_devices array */
 static struct device *devices_head = NULL;	/* sane_get_devices list */
 
@@ -376,16 +377,26 @@ static size_t max_string_size (SANE_String_Const s[])
   return max;
 }
 
+/*
 static SANE_String_Const doc_sources[] = {
   "Flatbed", "ADF", "Auto", NULL
 };
-
 static int doc_source_to_code[] = {
   0x40, 0x20, 0x80
+};
+*/
+
+static SANE_String_Const doc_sources[] = {
+  "Flatbed", "Auto", NULL
+};
+
+static int doc_source_to_code[] = {
+  0x40, 0x80
 };
 
 static SANE_String_Const scan_modes[] = {
   SANE_VALUE_SCAN_MODE_LINEART,
+  SANE_VALUE_SCAN_MODE_HALFTONE,
   SANE_VALUE_SCAN_MODE_GRAY,
   SANE_VALUE_SCAN_MODE_COLOR,
   NULL
@@ -527,20 +538,35 @@ static void set_parameters(struct device *dev)
 #define BETTER_BASEDPI 1
   /* tests prove that 1200dpi base is very inexact
    * so I calculated better values for each axis */
-#if BETTER_BASEDPI 
+/*
+#if BETTER_BASEDPI
   px_to_len = 1180.0 / dev->val[OPT_RESOLUTION].w;
 #endif
-  dev->para.pixels_per_line = dev->win_width / px_to_len;
+There is no good in defining longer than requested scanlines,
+the result is a white band on the right side of the image.
+*/
+  dev->para.pixels_per_line = dev->win_width / px_to_len - 1; /*-1px to be sure*/
   dev->para.bytes_per_line = dev->para.pixels_per_line;
 #if BETTER_BASEDPI
   px_to_len = 1213.9 / dev->val[OPT_RESOLUTION].w;
 #endif
   dev->para.lines = dev->win_len / px_to_len;
+  whitelines = 0;
   if (dev->composition == MODE_LINEART ||
       dev->composition == MODE_HALFTONE) {
     dev->para.format = SANE_FRAME_GRAY;
     dev->para.depth = 1;
     dev->para.bytes_per_line = (dev->para.pixels_per_line + 7) / 8;
+    switch(dev->val[OPT_RESOLUTION].w) {
+      case 75 :
+      case 100 : whitelines = 1; break;
+      case 150 : 
+      case 200 : whitelines = 2; break;
+      case 300 : 
+      case 600 : whitelines = 3; break;
+      case 1200 : whitelines = 6;
+    }
+    dev->para.lines -= whitelines;
   } else if (dev->composition == MODE_GRAY8) {
     dev->para.format = SANE_FRAME_GRAY;
     dev->para.depth = 8;
@@ -734,7 +760,17 @@ dev_inquiry (struct device *dev)
   reset_options(dev);
   fix_window(dev);
   set_parameters(dev);
-  resolv_inq_dpi(dev);
+  //resolv_inq_dpi(dev);
+  /* Explicit allowed resolutions, because SCX-4600 is shy about its 1200dpi.
+  The first element in the list is an integer (SANE_Int) that specifies the
+  length of the list (not counting the length itself).*/
+  dev->dpi_list[0] = 6;
+  dev->dpi_list[1] = 75;
+  dev->dpi_list[2] = 150;
+  dev->dpi_list[3] = 200;
+  dev->dpi_list[4] = 300;
+  dev->dpi_list[5] = 600;
+  dev->dpi_list[6] = 1200;
 
   return SANE_STATUS_GOOD;
 }
@@ -940,7 +976,7 @@ SANE_Status
 sane_init (SANE_Int * version_code, SANE_Auth_Callback cb)
 {
   DBG_INIT ();
-  DBG (2, "sane_init: Xerox backend (build %d) %p, %p\n", BACKEND_BUILD,
+  DBG (2, "sane_init: Samsung backend (build %d) %p, %p\n", BACKEND_BUILD,
        (void *)version_code, (void *)cb);
 
   if (version_code)
@@ -984,8 +1020,8 @@ sane_get_devices (const SANE_Device *** device_list, SANE_Bool local)
   config.count = 0;
   config.descriptors = NULL;
   config.values = NULL;
-  sanei_configure_attach (XEROX_CONFIG_FILE, &config, list_conf_devices);
-  sanei_usb_attach_matching_devices ("usb 0x0924 0x3da4", list_one_device);
+  sanei_configure_attach (SAMSUNG_CONFIG_FILE, &config, list_conf_devices);
+  //sanei_usb_attach_matching_devices ("usb 0x0924 0x3da4", list_one_device);
 
   sanei_usb_set_timeout (30000);
 
@@ -1266,9 +1302,19 @@ sane_read (SANE_Handle h, SANE_Byte * buf, SANE_Int maxlen, SANE_Int * lenp)
       /* copy will do minimal of valid data */
       if (dev->para.format == SANE_FRAME_RGB && dev->line_order)
 	clrlen = copy_mix_bands_trim(dev, buf, maxlen, &olen);
-      else
+      else {
+        if (!dev->dataindex &&
+          !dev->y_off &&
+          whitelines &&
+          (clrlen = dev->bytes_per_line * whitelines) < dev->datalen) {
+          /* Skip some empty starting lines. */
+          dev->dataindex = clrlen;
+          dev->datalen -= clrlen;
+          dev->dataoff = (dev->dataoff + clrlen) & DATAMASK;
+          DBG (3, "Skipping a number of top lines: %d\n", whitelines);
+        }
 	clrlen = copy_plain_trim(dev, buf, maxlen, &olen);
-
+      }
       dev->datalen -= clrlen;
       dev->dataoff = (dev->dataoff + clrlen) & DATAMASK;
       buf += olen;
@@ -1359,7 +1405,7 @@ sane_start (SANE_Handle h)
   else if (dev->composition == MODE_LINEART ||
 	   dev->composition == MODE_HALFTONE) {
     dev->para.bytes_per_line = (dev->para.pixels_per_line + 7) / 8;
-    dev->para.pixels_per_line = dev->para.bytes_per_line * 8;
+    //dev->para.pixels_per_line = dev->para.bytes_per_line * 8;
   } else {
     dev->para.bytes_per_line = dev->para.pixels_per_line;
   }
@@ -1397,4 +1443,4 @@ void sane_cancel (SANE_Handle h)
   dev->cancel = 1;
 }
 
-/* xerox_mfp.c */
+/* samsung_mfp.c */
